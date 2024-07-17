@@ -18,7 +18,7 @@ from sklearn.metrics import roc_auc_score
 import matplotlib.pyplot as plt
 
 GCN_LAYERS = 3  # Number of GCN Layers # modificato ale
-HIDDEN_DIM = 64  # Number of hidden neurons in each GCN Layer
+hidden_channels = 64  # Number of hidden neurons in each GCN Layer
 learning_rate = 1e-3
 weight_decay = 5e-4
 epochs = 10
@@ -213,7 +213,7 @@ class Model(torch.nn.Module):
         )
         return pred
 
-model = Model(hidden_channels=64)
+model = Model(hidden_channels=hidden_channels)
 
 # Define the validation seed edges:
 edge_label_index = val_data["user", "rates", "movie"].edge_label_index
