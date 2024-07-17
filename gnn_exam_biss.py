@@ -157,6 +157,7 @@ train_loader = LinkNeighborLoader(
     shuffle=True,
 )
 
+
 class GNN(torch.nn.Module):
     def __init__(self, hidden_channels):
         super().__init__()
@@ -212,6 +213,7 @@ class Model(torch.nn.Module):
             data["user", "rates", "movie"].edge_weight,  # per ora non usato, serve?
         )
         return pred
+
 
 model = Model(hidden_channels=hidden_channels)
 
