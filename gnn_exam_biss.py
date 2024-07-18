@@ -37,6 +37,10 @@ params = {'legend.fontsize': 'medium',
           'ytick.labelsize': 'medium'}
 plt.rcParams.update(params)
 
+# Prepare folder for charts
+if not os.path.exists('charts'):
+    os.mkdir('charts')
+
 # check if datasets folder exists
 if not os.path.exists("datasets"):
     urllib.request.urlretrieve("https://files.grouplens.org/datasets/movielens/ml-latest-small.zip",
@@ -51,7 +55,8 @@ ratings_df = pd.read_csv(ratings_path, usecols=['userId', 'movieId', 'rating'])
 movies_df = pd.read_csv(movies_path, usecols=['movieId', 'title', 'genres'])
 
 sns.countplot(x='rating', data=ratings_df)
-plt.show()
+plt.savefig('charts/ratings-distribution.pdf', dpi=500)
+plt.close()
 
 # Split genres and convert into indicator variables:
 genres = movies_df['genres'].str.get_dummies('|')
@@ -277,14 +282,16 @@ plt.plot(val_losses, label="Validation Loss")
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.legend()
-plt.show()
+plt.savefig('charts/loss.pdf', dpi=500)
+plt.close()
 
 # Plot the validation AUCs:
 plt.plot(val_aucs, label="Validation AUC")
 plt.xlabel("Epoch")
 plt.ylabel("AUC")
 plt.legend()
-plt.show()
+plt.savefig('charts/auc.pdf', dpi=500)
+plt.close()
 
 # Define the validation seed edges:
 edge_label_index = test_data["user", "rates", "movie"].edge_label_index
