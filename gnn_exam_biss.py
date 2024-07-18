@@ -1,23 +1,23 @@
-import numpy as np  # linear algebra
-import pandas as pd  # data processing, CSV file I/O (e.g. pd.read_csv)
 import matplotlib.pyplot as plt
-import seaborn as sns
-import torch
+import numpy as np
 import os
-import zipfile
-import urllib.request
+import pandas as pd
+import seaborn as sns
+from sklearn.metrics import roc_auc_score
+import torch
 from torch import Tensor
 import torch.nn.functional as F
 from torch_geometric import seed_everything
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import SAGEConv, to_hetero
+from torch_geometric.nn.conv import SAGEConv
+from torch_geometric.nn import to_hetero
 from torch_geometric.loader import LinkNeighborLoader
 import torch_geometric.transforms as T
 import tqdm
-from sklearn.metrics import roc_auc_score
-import matplotlib.pyplot as plt
+import urllib.request
+import zipfile
 
-GCN_LAYERS = 3  # Number of GCN Layers # modificato ale
+GCN_LAYERS = 3 # Number of GCN Layers
 hidden_channels = 64  # Number of hidden neurons in each GCN Layer
 learning_rate = 1e-3
 weight_decay = 5e-4
@@ -97,7 +97,6 @@ print("Final edge indices pointing from users to movies:")
 print("=================================================")
 print(edge_index_user_to_movie)
 
-# Use rating as edge features: ale
 edge_rating = torch.from_numpy((ratings_df['rating'].to_numpy())).to(torch.float)
 
 print(edge_rating)
