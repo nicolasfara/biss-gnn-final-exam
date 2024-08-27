@@ -9,7 +9,7 @@ from torch import Tensor
 import torch.nn.functional as F
 from torch_geometric import seed_everything
 from torch_geometric.data import HeteroData
-from torch_geometric.nn.conv import SAGEConv
+from torch_geometric.nn.conv import SAGEConv, GraphConv, GATv2Conv
 from torch_geometric.nn import to_hetero
 from torch_geometric.loader import LinkNeighborLoader
 import torch_geometric.transforms as T
@@ -17,9 +17,9 @@ import tqdm
 import urllib.request
 import zipfile
 from torch.nn import ModuleList
+import time
 
 # some utility functions
-
 def head(l):
     return l[0]
 
@@ -176,13 +176,12 @@ train_loader = LinkNeighborLoader(
     shuffle=True,
 )
 
-
 class GNN(torch.nn.Module):
-    def __init__(self, hidden_channels, num_layers):
+    def __init__(self, hidden_channels, num_layers, layer_type):
         super().__init__()
         self.layers = ModuleList()
         for _ in range(num_layers):
-            self.layers.append(SAGEConv(hidden_channels, hidden_channels))
+            self.layers.append(globals()[layer_type](hidden_channels, hidden_channels,**({'add_self_loops': False} if layer_type == 'GATv2Conv' else {})))
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
         if len(self.layers) > 1:
@@ -206,7 +205,7 @@ class Classifier(torch.nn.Module):
 
 
 class Model(torch.nn.Module):
-    def __init__(self, hidden_channels):
+    def __init__(self, hidden_channels, gnn_layers, gnn_layer_type):
         super().__init__()
         # Since the dataset does not come with rich features, we also learn two
         # embedding matrices for users and movies:
@@ -214,7 +213,7 @@ class Model(torch.nn.Module):
         self.user_emb = torch.nn.Embedding(data["user"].num_nodes, hidden_channels)
         self.movie_emb = torch.nn.Embedding(data["movie"].num_nodes, hidden_channels)
         # Instantiate homogeneous GNN:
-        self.gnn = GNN(hidden_channels, 2)
+        self.gnn = GNN(hidden_channels, gnn_layers, gnn_layer_type)
         # Convert GNN model into a heterogeneous variant:
         self.gnn = to_hetero(self.gnn, metadata=data.metadata())
         self.classifier = Classifier()
@@ -235,102 +234,113 @@ class Model(torch.nn.Module):
         )
         return pred
 
+stats = df = pd.DataFrame(columns=['LayerType', 'NumLayers', 'AUC', 'Time'])
+for layer_name in ['GATv2Conv','SAGEConv', 'GraphConv']:
+    for layers in range(1,5):
+        model = Model(hidden_channels=hidden_channels, gnn_layers=layers, gnn_layer_type=layer_name)
 
-model = Model(hidden_channels=hidden_channels)
+        # Define the validation seed edges:
+        edge_label_index = val_data["user", "rates", "movie"].edge_label_index
+        edge_label = val_data["user", "rates", "movie"].edge_label
+        val_loader = LinkNeighborLoader(
+            data=val_data,
+            num_neighbors=[20, 10],
+            edge_label_index=(("user", "rates", "movie"), edge_label_index),
+            edge_label=edge_label,
+            batch_size=batch_Size,
+            shuffle=False,
+        )
+        sampled_data = next(iter(val_loader))
 
-# Define the validation seed edges:
-edge_label_index = val_data["user", "rates", "movie"].edge_label_index
-edge_label = val_data["user", "rates", "movie"].edge_label
-val_loader = LinkNeighborLoader(
-    data=val_data,
-    num_neighbors=[20, 10],
-    edge_label_index=(("user", "rates", "movie"), edge_label_index),
-    edge_label=edge_label,
-    batch_size=batch_Size,
-    shuffle=False,
-)
-sampled_data = next(iter(val_loader))
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Device: '{device}'")
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Device: '{device}'")
+        train_losses = []
+        val_losses = []
+        val_aucs = []
 
-train_losses = []
-val_losses = []
-val_aucs = []
+        model = model.to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-model = model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-for epoch in range(1, epochs):
-    total_loss = total_examples = 0
-    for sampled_data in tqdm.tqdm(train_loader):
-        optimizer.zero_grad()
-        sampled_data.to(device)
-        pred = model(sampled_data)
-        ground_truth = sampled_data["user", "rates", "movie"].edge_label
-        loss = F.binary_cross_entropy_with_logits(pred, ground_truth)
-        loss.backward()
-        optimizer.step()
-        total_loss += float(loss) * pred.numel()
-        total_examples += pred.numel()
+        print(f'Experiment with {layers} layers')
+        start = time.time()
+        for epoch in range(1, epochs):
+            total_loss = total_examples = 0
+            for sampled_data in tqdm.tqdm(train_loader):
+                optimizer.zero_grad()
+                sampled_data.to(device)
+                pred = model(sampled_data)
+                ground_truth = sampled_data["user", "rates", "movie"].edge_label
+                loss = F.binary_cross_entropy_with_logits(pred, ground_truth)
+                loss.backward()
+                optimizer.step()
+                total_loss += float(loss) * pred.numel()
+                total_examples += pred.numel()
 
-    avg_train_loss = total_loss / total_examples
-    train_losses.append(avg_train_loss)
-    print(f"Epoch: {epoch:02d}, Loss: {avg_train_loss:.4f}")
+            avg_train_loss = total_loss / total_examples
+            train_losses.append(avg_train_loss)
+            print(f"Epoch: {epoch:02d}, Loss: {avg_train_loss:.4f}")
 
-    preds = []
-    ground_truths = []
-    for sampled_data in tqdm.tqdm(val_loader):
-        with torch.no_grad():
-            sampled_data.to(device)
-            pred = model(sampled_data)
-            preds.append(pred)
-            ground_truths.append(sampled_data["user", "rates", "movie"].edge_label)
-    pred = torch.cat(preds, dim=0).cpu()
-    ground_truth = torch.cat(ground_truths, dim=0).cpu()
-    auc = roc_auc_score(ground_truth.numpy(), pred.numpy())
-    loss = F.binary_cross_entropy_with_logits(pred, ground_truth)
-    val_losses.append(float(loss))
-    val_aucs.append(auc)
-    print(f"\nValidation AUC: {auc:.4f}")
+            preds = []
+            ground_truths = []
+            for sampled_data in tqdm.tqdm(val_loader):
+                with torch.no_grad():
+                    sampled_data.to(device)
+                    pred = model(sampled_data)
+                    preds.append(pred)
+                    ground_truths.append(sampled_data["user", "rates", "movie"].edge_label)
+            pred = torch.cat(preds, dim=0).cpu()
+            ground_truth = torch.cat(ground_truths, dim=0).cpu()
+            auc = roc_auc_score(ground_truth.numpy(), pred.numpy())
+            loss = F.binary_cross_entropy_with_logits(pred, ground_truth)
+            val_losses.append(float(loss))
+            val_aucs.append(auc)
+            print(f"\nValidation AUC: {auc:.4f}")
+        end = time.time()
+        total_time = end - start
+        print(f'TOTAL LEARNING TIME: {total_time}')
 
-# Plot the training and validation losses:
-plt.plot(train_losses, label="Train Loss")
-plt.plot(val_losses, label="Validation Loss")
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.legend()
-plt.savefig('charts/loss.pdf', dpi=500)
-plt.close()
+        # Plot the training and validation losses:
+        plt.plot(train_losses, label="Train Loss")
+        plt.plot(val_losses, label="Validation Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.legend()
+        plt.savefig(f'charts/loss-layerType_{layer_name}-numLayers_{layers}.pdf', dpi=500)
+        plt.close()
 
-# Plot the validation AUCs:
-plt.plot(val_aucs, label="Validation AUC")
-plt.xlabel("Epoch")
-plt.ylabel("AUC")
-plt.legend()
-plt.savefig('charts/auc.pdf', dpi=500)
-plt.close()
+        # Plot the validation AUCs:
+        plt.plot(val_aucs, label="Validation AUC")
+        plt.xlabel("Epoch")
+        plt.ylabel("AUC")
+        plt.legend()
+        plt.savefig(f'charts/auc-layerType_{layer_name}-numLayers_{layers}.pdf', dpi=500)
+        plt.close()
 
-# Define the validation seed edges:
-edge_label_index = test_data["user", "rates", "movie"].edge_label_index
-edge_label = test_data["user", "rates", "movie"].edge_label
-test_loader = LinkNeighborLoader(
-    data=test_data,
-    num_neighbors=[20, 10],
-    edge_label_index=(("user", "rates", "movie"), edge_label_index),
-    edge_label=edge_label,
-    batch_size=batch_Size,
-    shuffle=False,
-)
-sampled_data = next(iter(test_loader))
+        # Define the validation seed edges:
+        edge_label_index = test_data["user", "rates", "movie"].edge_label_index
+        edge_label = test_data["user", "rates", "movie"].edge_label
+        test_loader = LinkNeighborLoader(
+            data=test_data,
+            num_neighbors=[20, 10],
+            edge_label_index=(("user", "rates", "movie"), edge_label_index),
+            edge_label=edge_label,
+            batch_size=batch_Size,
+            shuffle=False,
+        )
+        sampled_data = next(iter(test_loader))
 
-preds = []
-ground_truths = []
-for sampled_data in tqdm.tqdm(test_loader):
-    with torch.no_grad():
-        sampled_data.to(device)
-        preds.append(model(sampled_data))
-        ground_truths.append(sampled_data["user", "rates", "movie"].edge_label)
-pred = torch.cat(preds, dim=0).cpu().numpy()
-ground_truth = torch.cat(ground_truths, dim=0).cpu().numpy()
-auc = roc_auc_score(ground_truth, pred)
-print(f"Test AUC: {auc:.4f}")
+        preds = []
+        ground_truths = []
+        for sampled_data in tqdm.tqdm(test_loader):
+            with torch.no_grad():
+                sampled_data.to(device)
+                preds.append(model(sampled_data))
+                ground_truths.append(sampled_data["user", "rates", "movie"].edge_label)
+        pred = torch.cat(preds, dim=0).cpu().numpy()
+        ground_truth = torch.cat(ground_truths, dim=0).cpu().numpy()
+        auc = roc_auc_score(ground_truth, pred)
+        print(f"Test AUC: {auc:.4f}")
+        stats = stats._append({'LayerType': layer_name, 'NumLayers': layers, 'AUC': auc, 'Time': total_time}, ignore_index=True)
+
+stats.to_csv('stats.csv', index=False)
